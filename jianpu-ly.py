@@ -3,7 +3,7 @@
 
 r"""
 # Jianpu (numbered musical notaion) for Lilypond
-# v1.75 (c) 2012-2023 Silas S. Brown
+# v1.801 (c) 2012-2024 Silas S. Brown
 
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -49,6 +49,7 @@ Lyrics (verse 2): L: 2. Here is verse two
 Hanzi lyrics (auto space): H: hanzi (with or without spaces)
 Lilypond headers: title=the title (on a line of its own)
 Guitar chords: chords=c2. g:7 c (on own line)
+Fret diagrams: frets=guitar (on own line)
 Multiple parts: NextPart
 Instrument of current part: instrument=Flute (on a line of its own)
 Multiple movements: NextScore
@@ -565,13 +566,13 @@ class NoteheadMarkup:
         self.inBeamGroup = "restHack"
     self.lastNBeams = nBeams
     beamC = u'\u0333' if nBeams>=2 else u'\u0332' if nBeams==1 else u""
-    self.unicode_approx.append(u""+(u"-" if invisTieLast else figures[-1:])+(u"" if invisTieLast else (u'\u0323' if "," in octave else u'\u0307' if "'" in octave else u""))+beamC+u''.join(c+beamC for c in dots)+(u"" if self.inBeamGroup else u" ")) # (NB inBeamGroup is correct only if not midi and not western)
+    self.unicode_approx.append({'#':u"\u266f",'b':u"\u266d"}.get(accidental,u"")+(u"-" if invisTieLast else figures[-1:])+beamC+(u"" if invisTieLast else (u'\u0323' if "," in octave else u'\u0307' if "'" in octave else u""))+u''.join(c+beamC for c in dots)+(u"" if self.inBeamGroup else u" ")) # (NB inBeamGroup is correct only if not midi and not western)
     if self.barPos == self.barLength:
         self.unicode_approx[-1]=self.unicode_approx[-1].rstrip()+u'\u2502'
         self.barPos = 0 ; self.barNo += 1
         self.current_accidentals = {}
     # Octave dots:
-    if not midi and not western and not invisTieLast:
+    if not midi and not western and not '-' in figures:
       # Tweak the Y-offset, as Lilypond occasionally puts it too far down:
       if not nBeams: ret += {",":r"-\tweak #'Y-offset #-1.2 ",
                              ",,":r"-\tweak #'Y-offset #1 "}.get(octave,"")
@@ -610,7 +611,10 @@ def parseNote(word,origWord,line):
         try: nBeams = list("cqsdh").index(nBeams)
         except ValueError: scoreError("Can't calculate number of beams from "+nBeams+" in",origWord,line)
     else: nBeams=None # unspecified
-    octave = "".join(c for c in word if c in "',")
+    octaves = re.findall("'+|,+",word)
+    if len(octaves)>1: scoreError("Multiple octave-dot settings not yet implemented:",origWord,line) # TODO: apparently, multiple sets of octave dots in chords are stacked, so a dot ends up vertically between figures; this would require adding to defines_done name and the dir-column, probably with baseline-skip adjustments
+    if octaves: octave = octaves[0]
+    else: octave = ""
     accidental = "".join(c for c in word if c in "#b")
     return figures,nBeams,dots,octave,accidental,tremolo
 
@@ -917,6 +921,7 @@ def getLY(score,headers=None):
         for word in line.split():
             word=word.replace(chr(0)," ")
             if word in ["souyin","harmonic","up","down","bend","tilde"]: word="Fr="+word # (Fr= before these is optional)
+            if re.match("[16]=[#b][A-Ga-g]$",word): word=word[:2]+word[3]+word[2] # somebody wrote a key name backwards (bE instead of Eb), we can fix that here
             if word.startswith('%'): break # a comment
             elif re.match("[1-468]+[.]*=[1-9][0-9]*$",word): out.append(r'\tempo '+word) # TODO: reduce size a little?
             elif re.match("[16]=[A-Ga-g][#b]?$",word): #key
@@ -936,7 +941,8 @@ def getLY(score,headers=None):
             elif word.startswith("Fr="):
               finger = word.split("=")[1]
               finger = {
-                  "1": u"\u4e00", "2": u"\u4c8c",
+                  "0": u"\u5b80",
+                  "1": u"\u4e00", "2": u"\u4e8c",
                   "3": u"\u4e09", "4": u"\u56db",
                   "souyin": u"\u4e45", # jiu3
                   "harmonic": u"\u25cb", # white circle: TODO: can we use Lilypond's ^\flageolet command (not in a \finger{}) which doesn't require a font with 25CB in it? or would that get wrong size? (can be tweaked)
@@ -946,7 +952,7 @@ def getLY(score,headers=None):
                   "tilde": u"\u223c", # full-width tilde.  Could also use U+1D008 "Byzantine musical symbol syrmatiki" but that (a) won't display on macOS (as of 12.6) and (b) needs special consideration for old versions of Python 2 on narrow Unicode builds
                   }.get(finger, finger)
               if not type("")==type(u""): finger = finger.encode('utf-8') # Python 2
-              out.append(r'\finger "%s"' % finger)
+              out.append(r'\finger \markup { \fontsize #-4 "%s" } ' % finger)
             elif re.match("letter[A-Z]$",word):
                 out.append(r'\mark \markup { \box { "%s" } }' % word[-1]) # TODO: not compatible with key change at same point, at least not in lilypond 2.20 (2nd mark mentioned will be dropped)
             elif re.match(r"R\*[1-9][0-9]*$",word):
@@ -1208,7 +1214,15 @@ def process_input(inDat):
          del headers["instrument"]
      else: inst = None
      if "chords" in headers:
+         if "frets" in headers:
+             frets = headers["frets"]
+             assert frets in ["guitar","ukulele","mandolin"]
+             fretsInc = r'\include "predefined-'+frets+'-fretboards.ly"\n'
+             if not fretsInc in ret: ret.insert(1,fretsInc) # after all-scores-start
+             del headers["frets"]
+         else: frets = None
          ret.append(r'\new ChordNames { \chordmode { '+headers["chords"]+' } }')
+         if frets: ret.append(r'\new FretBoards { '+('' if frets=='guitar' else r'\set Staff.stringTunings = #'+frets+'-tuning')+r' \chordmode { '+headers["chords"]+' } }')
          del headers["chords"]
      if midi:
        ret.append(midi_staff_start()+" "+out+" "+midi_staff_end())
